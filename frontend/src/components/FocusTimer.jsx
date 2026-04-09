@@ -1,5 +1,8 @@
-import { useState, useEffect } from 'react';
-import { Play, Pause, RotateCcw, CheckCircle, Minus, Plus, Settings2 } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Play, Pause, RotateCcw, CheckCircle, Minus, Plus, Settings2, Users } from 'lucide-react';
+import { io } from 'socket.io-client';
+
+const SOCKET_URL = 'http://localhost:5000';
 
 export default function FocusTimer({ subjectName }) {
   const [selectedMinutes, setSelectedMinutes] = useState(25);
@@ -7,6 +10,12 @@ export default function FocusTimer({ subjectName }) {
   const [isActive, setIsActive] = useState(false);
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
+  
+  // Real-time states
+  const [roomId, setRoomId] = useState('');
+  const [isInRoom, setIsInRoom] = useState(false);
+  const [roomUsers, setRoomUsers] = useState(1);
+  const socketRef = useRef(null);
 
   useEffect(() => {
     let interval = null;
@@ -32,21 +41,76 @@ export default function FocusTimer({ subjectName }) {
     }
   }, [selectedMinutes, isActive]);
 
+  // Socket setup
+  useEffect(() => {
+    socketRef.current = io(SOCKET_URL);
+
+    socketRef.current.on('room-users', (count) => setRoomUsers(count));
+
+    socketRef.current.on('timer-sync', (serverState) => {
+      setIsActive(serverState.isActive);
+      setTimeLeft(serverState.timeLeft);
+      setSelectedMinutes(serverState.selectedMinutes);
+    });
+
+    socketRef.current.on('timer-action', ({ action, payload, serverState }) => {
+      if (action === 'start') setIsActive(true);
+      if (action === 'pause') setIsActive(false);
+      if (action === 'reset' || action === 'change-minutes') {
+        setIsActive(false);
+        setTimeLeft(serverState.timeLeft);
+        setSelectedMinutes(serverState.selectedMinutes);
+      }
+    });
+
+
+    return () => {
+      socketRef.current.disconnect();
+    };
+  }, []);
+
+  const joinRoom = () => {
+    if (roomId.trim() && socketRef.current) {
+      socketRef.current.emit('join-room', roomId);
+      setIsInRoom(true);
+    }
+  };
+
+  const leaveRoom = () => {
+    if (socketRef.current) {
+      socketRef.current.emit('leave-room', roomId);
+    }
+    setIsInRoom(false);
+    setRoomUsers(1);
+    setRoomId('');
+  };
+
   const toggleTimer = () => {
-    setIsActive(!isActive);
+    const newIsActive = !isActive;
+    setIsActive(newIsActive);
     setIsEditing(false); // Close edit mode if active
+    if (isInRoom && socketRef.current) {
+      socketRef.current.emit('timer-action', { roomId, action: newIsActive ? 'start' : 'pause', payload: {} });
+    }
   };
 
   const resetTimer = () => {
     setIsActive(false);
     setTimeLeft(selectedMinutes * 60);
+    if (isInRoom && socketRef.current) {
+      socketRef.current.emit('timer-action', { roomId, action: 'reset', payload: { selectedMinutes } });
+    }
   };
 
   const adjustTime = (amount) => {
     if (isActive) return;
     const newTime = Math.max(1, Math.min(120, selectedMinutes + amount));
     setSelectedMinutes(newTime);
+    if (isInRoom && socketRef.current) {
+      socketRef.current.emit('timer-action', { roomId, action: 'change-minutes', payload: { selectedMinutes: newTime } });
+    }
   };
+
 
   // Calculate percentage for circular progress
   const totalSeconds = selectedMinutes * 60;
@@ -61,7 +125,34 @@ export default function FocusTimer({ subjectName }) {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', padding: '1.25rem', background: 'rgba(255,255,255,0.02)', borderRadius: '24px', border: '1px solid var(--glass-border)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      {/* Join Room UI */}
+      <div style={{ padding: '0.8rem 1.25rem', background: 'rgba(255,255,255,0.02)', borderRadius: '16px', border: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <Users size={18} color="var(--primary-glow)" />
+          <span style={{ color: 'var(--text-main)', fontWeight: 'bold' }}>Study Room</span>
+          {isInRoom && <span style={{ fontSize: '0.8rem', background: 'rgba(0, 242, 254, 0.2)', color: 'var(--primary-glow)', padding: '2px 8px', borderRadius: '12px' }}>{roomUsers} {roomUsers === 1 ? 'Person' : 'People'}</span>}
+        </div>
+        {!isInRoom ? (
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <input 
+              type="text" 
+              placeholder="Room ID (e.g. math101)" 
+              value={roomId} 
+              onChange={e => setRoomId(e.target.value)}
+              style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px 12px', borderRadius: '8px', fontSize: '0.9rem', outline: 'none' }}
+            />
+            <button onClick={joinRoom} style={{ background: 'var(--primary-glow)', color: '#000', border: 'none', padding: '6px 16px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', transition: '0.2s' }}>Join</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Room: <strong style={{color: 'var(--text-main)'}}>{roomId}</strong></span>
+            <button onClick={leaveRoom} style={{ background: 'rgba(255,75,75,0.1)', color: 'var(--danger)', border: '1px solid rgba(255,75,75,0.3)', padding: '6px 12px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', transition: '0.2s' }}>Leave</button>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', padding: '1.25rem', background: 'rgba(255,255,255,0.02)', borderRadius: '24px', border: '1px solid var(--glass-border)' }}>
       
       <div className="circular-timer" style={{ position: 'relative' }}>
         <svg viewBox="0 0 120 120">
@@ -146,6 +237,9 @@ export default function FocusTimer({ subjectName }) {
           {sessionsCompleted} sessions completed
         </div>
       </div>
+      </div>
+
+
     </div>
   );
 }

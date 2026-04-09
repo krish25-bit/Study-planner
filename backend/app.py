@@ -7,10 +7,15 @@ import pandas as pd
 import bcrypt
 import jwt
 from functools import wraps
+from flask_socketio import SocketIO, join_room, leave_room, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your_secret_key_here'
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# In-memory store for room states (mirroring the Node.js logic)
+room_timers = {}
 
 # MongoDB setup
 client = MongoClient('mongodb://localhost:27017/')
@@ -216,5 +221,61 @@ def get_analytics(current_user):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- Socket.IO Events ---
+
+@socketio.on('connect')
+def handle_connect():
+    print(f"Client connected: {request.sid}")
+
+@socketio.on('join-room')
+def handle_join_room(room_id):
+    join_room(room_id)
+    print(f"User {request.sid} joined room {room_id}")
+    
+    # Broadcast room size (simplified: count using socketio namespace or just emit 2 for 'two persons')
+    # Real room size counting in Flask-SocketIO can be complex, for now we let frontend handle local count or return 2
+    emit('room-users', 2, to=room_id) # Sending 2 as a placeholder for "Multi-user"
+
+    if room_id in room_timers:
+        emit('timer-sync', room_timers[room_id])
+
+@socketio.on('leave-room')
+def handle_leave_room(room_id):
+    leave_room(room_id)
+    print(f"User {request.sid} left room {room_id}")
+
+@socketio.on('timer-action')
+def handle_timer_action(data):
+    room_id = data.get('roomId')
+    action = data.get('action')
+    payload = data.get('payload', {})
+
+    if not room_id:
+        return
+
+    if room_id not in room_timers:
+        room_timers[room_id] = {'isActive': False, 'timeLeft': 25 * 60, 'selectedMinutes': 25}
+
+    state = room_timers[room_id]
+
+    if action == 'start':
+        state['isActive'] = True
+    elif action == 'pause':
+        state['isActive'] = False
+    elif action == 'reset':
+        state['isActive'] = False
+        state['timeLeft'] = payload.get('selectedMinutes', 25) * 60
+        state['selectedMinutes'] = payload.get('selectedMinutes', 25)
+    elif action == 'update-time':
+        state['timeLeft'] = payload.get('timeLeft')
+        state['isActive'] = payload.get('isActive')
+    elif action == 'change-minutes':
+        state['selectedMinutes'] = payload.get('selectedMinutes', 25)
+        state['timeLeft'] = state['selectedMinutes'] * 60
+
+    # Broadcast to everyone else in the room
+    emit('timer-action', {'action': action, 'payload': payload, 'serverState': state}, to=room_id, include_self=False)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    socketio.run(app, debug=True, port=5000)
